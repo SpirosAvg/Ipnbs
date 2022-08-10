@@ -1,0 +1,234 @@
+library(rvest)
+library(tidyverse)
+library(plyr)
+library(zoo)
+## set basic htmls
+Sys.setlocale(category = "LC_ALL", locale = "Greek")
+basic_html_to_iterate<-"https://www.giorgostsoulis.com/syntages"
+basic_html_to_iterate_for_ingredients<-"https://www.giorgostsoulis.com"
+basic_html <- read_html("https://www.giorgostsoulis.com/syntages")
+
+## get the max number of recipe pages
+pagination_nodes<-basic_html%>%html_nodes('.pagination')
+matches <- regmatches(pagination_nodes, gregexpr("[[:digit:]]+", pagination_nodes))
+max_pages_of_recipes<-max(as.numeric(unlist(matches)))
+
+recipe_data<-list()
+
+for (p in 1:max_pages_of_recipes){
+  print(p)
+  basic_html_page<-read_html(paste0(basic_html_to_iterate,"/page-",p))
+      
+    ## for each page 
+    # get all the recipe titles
+    recipe_titles<-basic_html_page %>%
+      html_nodes("h3.catItemTitle") %>%
+      html_text2()
+    
+    recipe_categories<-basic_html_page %>%
+      html_nodes(".catItemCategorytitle") %>%
+      html_text2()
+    ## get all the recipe links 
+    
+    k<-basic_html_page %>%
+      html_nodes(".catItemTitle")
+    
+    
+    recipe_links<-vector()
+    
+    for (i in 1:length(k)){
+     recipe_links[i] <-strsplit(as.character(k[i]),'"')[[1]][4]
+    }
+    
+    # join titles with links and create first form of dataset
+    recipe_data_temp<-as.data.frame(cbind(recipe_titles,recipe_categories,recipe_links))
+    
+    #### get ingredients
+    recipe_pages_list<-vector()
+    for (i in 1:nrow(recipe_data_temp)){
+      
+      recipe_pages_list[i]<-paste0(basic_html_to_iterate_for_ingredients,recipe_data_temp$recipe_links[i])
+    }
+    
+    ingredients_list<-list()
+  
+    for (i in 1:length(recipe_pages_list)){
+      
+      if (str_detect(recipe_pages_list[i],"blog")==FALSE){
+      recipe_links_temp=recipe_data_temp$recipe_links[i]
+      ingredients_temp<-read_html(recipe_pages_list[i])
+    
+       k3<-ingredients_temp %>%
+        html_nodes(".recipeInfo-value")%>%
+        html_text2()
+       
+       k4<-ingredients_temp %>%
+         html_nodes(".recipeInfo-title")%>%
+         html_text2()
+       
+       k3<-k3[1:(length(k3)/2)]
+       k4<-k4[1:(length(k4)/2)]
+       
+       names(k3)<-k4
+       
+       k3<-as_tibble(as.list(k3))
+       ingredients_of_the_recipe<-ingredients_temp%>%html_nodes("[itemprop='recipeIngredient']")%>%html_nodes("p")%>%html_text2()
+       
+       ingredients_of_the_recipe<-ingredients_of_the_recipe[! ingredients_of_the_recipe %in% c(' ')]
+       ingredients_of_the_recipe<-ingredients_of_the_recipe[! str_detect(ingredients_of_the_recipe,enc2utf8('Για τ'))]
+       if(length(ingredients_of_the_recipe>0)){
+       names(ingredients_of_the_recipe) <- paste0("ingredient_",1:length(ingredients_of_the_recipe))
+       
+       ingredients_of_the_recipe<-as_tibble(as.list(ingredients_of_the_recipe))
+       
+       
+       to_list<-cbind(recipe_links_temp,k3,ingredients_of_the_recipe)
+       ingredients_list[[i]]<-to_list
+       }
+      }
+       
+    }
+    
+    ingredients_list<-do.call("rbind.fill",ingredients_list)
+    
+    recipe_data_temp<-recipe_data_temp[!str_detect(recipe_data_temp$recipe_links,'blog'),]
+    
+    names(ingredients_list)[1]<-"recipe_links"
+    recipe_data[[p]]<-left_join(recipe_data_temp,ingredients_list,by="recipe_links")
+    print(paste(p,"...finished"))
+}
+
+
+recipe_data_f<-do.call("rbind.fill",recipe_data)
+
+
+
+## get the columns together and rename, add more if more come up
+
+recipe_data_f<-recipe_data_f%>%
+  mutate(
+         prep_time=ΠΡΟΕΤΟΙΜΑΣΙΑ,
+         exec_time=ΕΚΤΕΛΕΣΗ,
+         waiting_time=ΑΝΑΜΟΝΗ,
+         pieces=ΤΕΜΑΧΙΑ,
+         portions=ΜΕΡΙΔΕΣ,
+         difficulty=`ΒΑΘΜΟΣ ΔΥΣΚΟΛΙΑΣ`
+         )
+recipe_data_f<-recipe_data_f%>%select(-c(ΠΡΟΕΤΟΙΜΑΣΙΑ,
+                                     ΕΚΤΕΛΕΣΗ,
+                                     ΑΝΑΜΟΝΗ,
+                                     ΤΕΜΑΧΙΑ,
+                                     ΜΕΡΙΔΕΣ,
+                                     `ΒΑΘΜΟΣ ΔΥΣΚΟΛΙΑΣ`)
+                                  )
+
+## fill with zeros 
+
+recipe_data_f<-recipe_data_f%>%
+  mutate(prep_time=coalesce(prep_time,'0Λ'),
+         exec_time=coalesce(exec_time,'0Λ'),
+         waiting_time=coalesce(waiting_time,'0Λ')
+         )
+
+### transform numerics 
+
+recipe_data_f<-recipe_data_f%>%mutate(difficulty=as.numeric(str_replace(difficulty,"/5","")),
+                )
+
+prep_times<-str_split(recipe_data_f$prep_time," ")
+exec_times<-str_split(recipe_data_f$exec_time," ")
+waiting_times<-str_split(recipe_data_f$waiting_time," ")
+
+prep_times_vec<-vector()
+exec_times_vec<-vector()
+waiting_times_vec<-vector()
+
+
+for (j in 1:length(prep_times)){
+  for (n in 1:length(prep_times[[j]])){
+    ## transform everything to mins
+     # days
+    if (str_detect(prep_times[[j]][n],enc2utf8('Η'))){
+      prep_times[[j]][n]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", prep_times[[j]][n]))*1440
+    }
+    #hours
+    if (str_detect(prep_times[[j]][n],enc2utf8('Ω'))){
+      prep_times[[j]][n]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", prep_times[[j]][n]))*60
+    }
+    
+     #mins
+    if (str_detect(prep_times[[j]][n],enc2utf8('Λ'))){
+      prep_times[[j]][n]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", prep_times[[j]][n]))
+    }
+  }
+
+  for (l in 1:length(exec_times[[j]])){
+    ## transform everything to mins
+    # days
+    if (str_detect(exec_times[[j]][l],enc2utf8('Η'))){
+      exec_times[[j]][l]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", exec_times[[j]][l]))*1440
+    }
+    #hours
+    if (str_detect(exec_times[[j]][l],enc2utf8('Ω'))){
+      exec_times[[j]][l]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", exec_times[[j]][l]))*60
+    }
+    
+    #mins
+    if (str_detect(exec_times[[j]][l],enc2utf8('Λ'))){
+      exec_times[[j]][l]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", exec_times[[j]][l]))
+    }
+  }
+  
+  for (o in 1:length(waiting_times[[j]])){
+    ## transform everything to mins
+    # days
+    if (str_detect(waiting_times[[j]][o],enc2utf8('Η'))){
+      waiting_times[[j]][o]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", waiting_times[[j]][o]))*1440
+    }
+    #hours
+    if (str_detect(waiting_times[[j]][o],enc2utf8('Ω'))){
+      waiting_times[[j]][o]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", waiting_times[[j]][o]))*60
+    }
+    
+    #mins
+    if (str_detect(waiting_times[[j]][o],enc2utf8('Λ'))){
+      waiting_times[[j]][o]<-as.numeric(gsub(".*?([0-9]+).*", "\\1", waiting_times[[j]][o]))
+    }
+  }
+    
+    jpreptemp<-as.data.frame(prep_times[[j]])
+    names(jpreptemp)<-"temp_mins"
+    jpreptemp<-sum(as.numeric(jpreptemp$temp_mins))
+    
+    jexecptemp<-as.data.frame(exec_times[[j]])
+    names(jexecptemp)<-"temp_mins"
+    jexecptemp<-sum(as.numeric(jexecptemp$temp_mins))
+    
+    jwaitptemp<-as.data.frame(waiting_times[[j]])
+    names(jwaitptemp)<-"temp_mins"
+    jwaitptemp<-sum(as.numeric(jwaitptemp$temp_mins))
+    
+    
+    prep_times_vec[j]<-jpreptemp
+    exec_times_vec[j]<-jexecptemp
+    waiting_times_vec[j]<-jwaitptemp
+  }
+  
+prep_times_vec<-na.fill(prep_times_vec,0)
+exec_times_vec<-na.fill(exec_times_vec,0)
+waiting_times_vec<-na.fill(waiting_times_vec,0)
+
+recipe_data_f$prep_time<-prep_times_vec
+recipe_data_f$exec_time<-exec_times_vec
+recipe_data_f$waiting_time<-waiting_times_vec
+
+recipe_data_l<-recipe_data_f[!is.na(recipe_data_f$ingredient_1),]
+write_excel_csv(recipe_data_l,"final_data_cache.csv")
+
+
+### 
+
+detach("package:plyr", unload=TRUE)
+
+by_cat<-recipe_data_l%>%group_by(recipe_categories)%>%summarise(count_cats=n())
+by_diff<-recipe_data_l%>%group_by(difficulty)%>%summarise(count_cats=n())
